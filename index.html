@@ -417,11 +417,12 @@
 
       <div class="lab" style="margin-top:18px">Income &amp; cash flow</div>
       <div class="ctrls">
-        <div class="f"><label>Monthly take-home ($)</label><input type="number" id="cfg-income" step="10"></div>
+        <div class="f"><label>Take-home per paycheck ($)</label><input type="number" id="cfg-paycheck" step="10"></div>
         <div class="f"><label>Rent &#8594; Grant ($/mo)</label><input type="number" id="cfg-rent" step="10"></div>
         <div class="f"><label>Operating floor ($)</label><input type="number" id="cfg-floor" step="25"></div>
         <div class="f"><label>Starting checking ($)</label><input type="number" id="cfg-startcash" step="50"></div>
         <div class="f"><label>Pay schedule</label><select id="cfg-cadence"><option value="monthly">Monthly</option><option value="semimonthly">Twice a month</option><option value="biweekly">Every two weeks</option></select></div>
+        <div class="f" id="paydays-f"><label>Pay days of month</label><span style="display:flex;gap:6px"><input type="number" id="cfg-pd1" min="1" max="31" step="1" style="width:62px"><input type="number" id="cfg-pd2" min="1" max="31" step="1" style="width:62px"></span></div>
         <div class="f"><label>Where are you now?</label><select id="cfg-startidx"></select></div>
       </div>
 
@@ -529,6 +530,7 @@ function payDays(i, cfg) {
 // except biweekly where some months carry a 3rd check — that variance is intentional)
 function basePaychecks(i, cfg) {
   const days = payDays(i, cfg);
+  if (cfg.paycheck != null) return days.map(d => ({ day: d, amt: cfg.paycheck })); // fixed take-home per check
   if (cfg.payCadence === 'biweekly') { const per = cfg.income * 12 / 26; return days.map(d => ({ day: d, amt: per })); }
   const per = cfg.income / days.length; return days.map(d => ({ day: d, amt: per }));
 }
@@ -730,9 +732,11 @@ const DEFAULT_CATS=[
   {key:'nails',label:'Nails',min:0,max:200,step:5,def:70},
   {key:'hair',label:'Hair',min:0,max:200,step:5,def:12},
   {key:'subs',label:'Subscriptions',min:0,max:100,step:1,def:9},
-  {key:'fun',label:'Fun / misc',min:0,max:600,step:10,def:0}
+  {key:'fun',label:'Fun / misc',min:0,max:600,step:10,def:0},
+  {key:'phone',label:'Phone (annual)',min:0,max:1000,step:5,def:0},
+  {key:'carins',label:'Car insurance',min:0,max:2000,step:10,def:0}
 ];
-const DEFAULT_CFG=()=>({income:2724.90,rentToGrant:700,fixedNonDebt:[{label:'Phone',amt:20,day:1},{label:'Car insurance',amt:100,day:1}],transferAmount:1000,transferStartIdx:8,startCash:800,floor:300,payCadence:'monthly',payDays:[1],budgetDefault:{groceries:0,dining:0,nails:70,hair:12,subs:9,fun:0},budgetOverride:{},monthAdjust:{},hysaRate:4.0,savingsTarget:15000,startSavings:0,scheduledStrategy:'clear',applyAll:false,startIdx:0});
+const DEFAULT_CFG=()=>({income:2696,paycheck:1348,rentToGrant:700,fixedNonDebt:[],transferAmount:1000,transferStartIdx:8,startCash:800,floor:300,payCadence:'semimonthly',payDays:[7,22],budgetDefault:{groceries:0,dining:0,nails:70,hair:12,subs:9,fun:0,phone:0,carins:0},budgetOverride:{},monthAdjust:{},hysaRate:4.0,savingsTarget:15000,startSavings:0,scheduledStrategy:'clear',applyAll:false,startIdx:0});
 
 const TREATMENTS=[['avalanche','Avalanche (pay by APR)'],['deferred','Deferred 0% (clear before deadline)'],['scheduled','Scheduled 0% installment'],['excluded','Excluded (long-haul)']];
 const CHECKLIST_ITEMS=[
@@ -759,6 +763,17 @@ function nonExclSum(debts){return debts.filter(d=>d.treatment!=='excluded').redu
 function deriveAdjust(){const a={};(state.entries||[]).forEach(e=>{a[e.monthIdx]=(a[e.monthIdx]||0)+e.amount;});return a;}
 function opts(){return Object.assign({},state.cfg,{monthAdjust:deriveAdjust()});}
 function baseOpts(){return DEFAULT_CFG();}
+function migrate(){
+  const c=state.cfg||(state.cfg=DEFAULT_CFG());
+  if(c.paycheck==null){c.paycheck=1348;c.payCadence='semimonthly';c.payDays=[7,22];}
+  if(!Array.isArray(c.payDays)||c.payDays.length<2)c.payDays=[7,22];
+  if(!Array.isArray(state.cats)||!state.cats.length)state.cats=DEFAULT_CATS.map(x=>({...x}));
+  const have=new Set(state.cats.map(x=>x.key));
+  DEFAULT_CATS.forEach(dc=>{if(!have.has(dc.key))state.cats.push({...dc});});
+  c.budgetDefault=c.budgetDefault||{};
+  DEFAULT_CATS.forEach(dc=>{if(c.budgetDefault[dc.key]==null)c.budgetDefault[dc.key]=dc.def;});
+  if(Array.isArray(c.fixedNonDebt)&&c.fixedNonDebt.length){c.fixedNonDebt=c.fixedNonDebt.filter(f=>!/phone|car\s*ins/i.test(f.label||''));}
+}
 const CATS=()=>state.cats;
 const fmt=n=>"$"+n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmt0=n=>"$"+Math.round(n).toLocaleString("en-US");
@@ -768,6 +783,7 @@ const treatmentColor={avalanche:'var(--gold)',deferred:'var(--alert)',scheduled:
 async function save(){try{await STORE.set(STORE_KEY,JSON.stringify(state));}catch(e){}}
 async function load(){
   try{const v=await STORE.get(STORE_KEY);if(v){const s=JSON.parse(v);state=Object.assign(freshState(),s);if(!Array.isArray(state.debts)||!state.debts.length)state.debts=DEFAULT_DEBTS.map(d=>({...d}));if(!state.cfg)state.cfg=DEFAULT_CFG();if(!Array.isArray(state.cats)||!state.cats.length)state.cats=DEFAULT_CATS.map(c=>({...c}));if(!state.checks)state.checks={};if(!Array.isArray(state.entries))state.entries=[];if(state.startNonExcl==null)state.startNonExcl=nonExclSum(state.debts);}}catch(e){}
+  migrate();
   buildSetup();bind();buildRail();renderAll();document.body.classList.add('intro');try{introReveal(computeView().pct);}catch(e){}setTimeout(()=>document.body.classList.remove('intro'),1600);
 }
 
@@ -988,7 +1004,8 @@ function buildSetup(){
   $('checklist').innerHTML='<div class="lab" style="margin:0 0 6px">First time? Five minutes with your statements (optional — it already runs on estimates)</div><ul>'+CHECKLIST_ITEMS.map(t=>'<li>'+t+'</li>').join('')+'</ul>';
   buildDebtEditor();
   const c=state.cfg;
-  $('cfg-income').value=c.income;$('cfg-rent').value=c.rentToGrant;$('cfg-floor').value=c.floor;$('cfg-startcash').value=c.startCash;
+  $('cfg-paycheck').value=(c.paycheck!=null?c.paycheck:c.income);$('cfg-rent').value=c.rentToGrant;$('cfg-floor').value=c.floor;$('cfg-startcash').value=c.startCash;
+  $('cfg-pd1').value=(c.payDays&&c.payDays[0]!=null?c.payDays[0]:7);$('cfg-pd2').value=(c.payDays&&c.payDays[1]!=null?c.payDays[1]:22);
   $('cfg-cadence').value=c.payCadence;$('cfg-tamt').value=c.transferAmount;$('cfg-sched').value=c.scheduledStrategy;
   $('cfg-savetgt').value=c.savingsTarget;$('cfg-hysa').value=c.hysaRate;
   const monthOpts=(sel,val,lblFn)=>{sel.innerHTML='';for(let i=0;i<=18;i++)sel.insertAdjacentHTML('beforeend','<option value="'+i+'">'+lblFn(i)+'</option>');sel.value=val;};
@@ -1065,7 +1082,10 @@ function addDebt(){
 
 function bindCfg(){
   const num=(id,key)=>{const el=$(id);el.addEventListener('input',()=>{const v=parseFloat(el.value);if(!isNaN(v)){state.cfg[key]=v;save();renderAll();}});};
-  num('cfg-income','income');num('cfg-rent','rentToGrant');num('cfg-floor','floor');num('cfg-startcash','startCash');
+  $('cfg-paycheck').addEventListener('input',()=>{const v=parseFloat($('cfg-paycheck').value);if(!isNaN(v)){state.cfg.paycheck=v;state.cfg.income=v*((state.cfg.payDays&&state.cfg.payDays.length)||1);save();renderAll();}});
+  const payday=(id,idx)=>{const el=$(id);el.addEventListener('input',()=>{let v=parseInt(el.value,10);if(!isNaN(v)){v=Math.min(28,Math.max(1,v));state.cfg.payDays=state.cfg.payDays||[7,22];state.cfg.payDays[idx]=v;save();renderAll();}});};
+  payday('cfg-pd1',0);payday('cfg-pd2',1);
+  num('cfg-rent','rentToGrant');num('cfg-floor','floor');num('cfg-startcash','startCash');
   num('cfg-tamt','transferAmount');num('cfg-savetgt','savingsTarget');num('cfg-hysa','hysaRate');
   const sel=(id,key,asInt)=>{const el=$(id);el.addEventListener('change',()=>{state.cfg[key]=asInt?+el.value:el.value;save();renderAll();});};
   sel('cfg-cadence','payCadence',false);sel('cfg-sched','scheduledStrategy',false);
@@ -1104,7 +1124,7 @@ function bind(){
   $('entryadd').addEventListener('click',()=>{const inp=$('entryamt'),v=parseFloat(inp.value);if(isNaN(v)||v===0)return;const id='e'+Date.now()+Math.floor(Math.random()*999),dateStr=new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'});state.entries.push({id,monthIdx:state.cfg.startIdx,amount:v,dateStr});inp.value='';save();renderAll();});
   $('dlbackup').addEventListener('click',()=>{try{const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='the-long-ride-backup.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);$('backupmsg').textContent='Backup downloaded — load it any time to restore.';}catch(e){$('backupmsg').textContent='Download blocked here; your plan is still auto-saved in this browser.';}});
   $('loadbackup').addEventListener('click',()=>$('fileinput').click());
-  $('fileinput').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const s=JSON.parse(r.result);if(!s.debts||!Array.isArray(s.debts))throw 0;state=Object.assign(freshState(),s);if(!state.cfg)state.cfg=DEFAULT_CFG();if(!state.cats||!state.cats.length)state.cats=DEFAULT_CATS.map(c=>({...c}));if(!state.checks)state.checks={};if(!Array.isArray(state.entries))state.entries=[];if(state.startNonExcl==null)state.startNonExcl=nonExclSum(state.debts);save();buildSetup();renderAll();$('backupmsg').textContent='Backup loaded \u2713';}catch(err){$('backupmsg').textContent='Could not read that file.';}};r.readAsText(f);e.target.value='';});
+  $('fileinput').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const s=JSON.parse(r.result);if(!s.debts||!Array.isArray(s.debts))throw 0;state=Object.assign(freshState(),s);if(!state.cfg)state.cfg=DEFAULT_CFG();if(!state.cats||!state.cats.length)state.cats=DEFAULT_CATS.map(c=>({...c}));if(!state.checks)state.checks={};if(!Array.isArray(state.entries))state.entries=[];if(state.startNonExcl==null)state.startNonExcl=nonExclSum(state.debts);migrate();save();buildSetup();renderAll();$('backupmsg').textContent='Backup loaded \u2713';}catch(err){$('backupmsg').textContent='Could not read that file.';}};r.readAsText(f);e.target.value='';});
   $('reset').addEventListener('click',()=>{state=freshState();try{STORE.del(STORE_KEY);}catch(e){}save();$('costslider').value=0;buildSetup();renderAll();$('backupmsg').textContent='Reset to the file defaults — all edits, budgets, entries, and check-marks cleared.';});
 }
 
