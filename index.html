@@ -107,12 +107,25 @@
   .tuner{background:rgba(90,111,214,.05);border:1px solid var(--line);border-radius:10px;padding:12px 13px;margin:14px 0 4px}
   .tuner .th{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
   .tuner .th .tt{font-family:"Space Grotesk";font-weight:600;font-size:12.5px}.tuner .th .tot{font-family:"IBM Plex Mono";font-size:12.5px;color:var(--gold);font-weight:600}
-  .slrow{display:grid;grid-template-columns:78px 1fr 52px;gap:9px;align-items:center;margin-bottom:6px}
+  .slrow{display:grid;grid-template-columns:15px 78px 1fr 52px;gap:8px;align-items:center;margin-bottom:6px;border-radius:6px}
   .slrow label{font-size:11.5px;color:var(--muted)}
   .slrow input[type=range]{width:100%;accent-color:var(--green);height:3px}
   .slrow .v{font-family:"IBM Plex Mono";font-size:12px;text-align:right;color:var(--text)}
+  .grip{display:inline-flex;align-items:center;justify-content:center;cursor:grab;color:var(--muted2);opacity:.45;transition:opacity .15s;touch-action:none;-webkit-user-select:none;user-select:none}
+  .grip:hover{opacity:.9}.grip:active{cursor:grabbing}
+  .slrow .grip{height:14px}
+  .slrow.dragging,.led tr.dragging{opacity:.4}
+  .slrow.dragover{box-shadow:inset 0 2px 0 var(--gold)}
+  .led tr.dragover td{box-shadow:inset 0 2px 0 var(--gold)}
+  .led .lg{width:14px;padding:0 0 0 2px;text-align:center}.led .lg .grip{height:12px}
+  .led td.edit,.slrow label.edit{cursor:pointer}
+  .led td.ll,.slrow label.edit{position:relative}
+  .celledit{font-family:"IBM Plex Mono";font-size:11px;width:100%;box-sizing:border-box;background:var(--panel3,#0f1422);color:var(--text);border:1px solid var(--gold);border-radius:4px;padding:2px 4px;outline:none;text-align:inherit;box-shadow:0 2px 8px rgba(0,0,0,.45)}
+  .celledit.txt{position:absolute;left:0;top:50%;transform:translateY(-50%);min-width:150px;max-width:240px;width:max-content;z-index:8;font-family:"Space Grotesk";text-align:left}
+  label.ledgerall{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);cursor:pointer;margin:9px 2px 2px}
+  label.ledgerall input{width:15px;height:15px;accent-color:var(--gold)}
   .slrow.changed .v{color:var(--green);font-weight:600}
-  .tuner .tf{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:9px;border-top:1px solid var(--line)}
+  .tuner .tf{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:7px 14px;margin-top:10px;padding-top:9px;border-top:1px solid var(--line)}
   .tuner .applyall{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);cursor:pointer}.tuner .applyall input{width:15px;height:15px;accent-color:var(--gold)}
   .tuner .btreset{background:none;border:1px solid var(--line);color:var(--muted2);font-size:10px;font-family:"Space Grotesk";font-weight:600;padding:4px 9px;border-radius:6px;cursor:pointer}.tuner .btreset:hover{color:var(--alert);border-color:var(--alert-dim)}
 
@@ -413,7 +426,6 @@
   <div class="card drawer" id="setup">
     <div class="chead"><span class="ti">⚙ Setup — the numbers</span><span class="hint">enter once when you have your statements · edit anytime</span><span class="chev">▶</span></div>
     <div class="cbody">
-      <div class="checklist" id="checklist"></div>
       <div class="lab">Your debts — add, remove, and correct. Seeded with best-guess estimates.</div>
       <div class="deditor" id="deditor"></div>
       <div class="btnrow"><button class="btn go" id="adddebt">+ Add a debt</button><button class="btn" id="markstart">Use current balances as my start line</button></div>
@@ -546,6 +558,15 @@ function discTotal(cfg, i, CATS) { return CATS.reduce((s, c) => s + getB(cfg, i,
 //         startCash,floor,payCadence,payDays,budgetDefault,budgetOverride,monthAdjust,
 //         hysaRate,savingsTarget,startSavings,scheduledStrategy('clear'|'hold')}
 // CATS:  [{key,label,min,max,step,def}]
+// net signed cash delta from per-line amount overrides (income +, expense -); keeps engine reconciled with the edited ledger
+function lineDelta(cfg, i, transferOn){
+  const ed = cfg.lineEdits && cfg.lineEdits[i]; if(!ed) return 0; let dl = 0;
+  basePaychecks(i, cfg).forEach((p,k)=>{ const o=ed['pay'+k]; if(o&&o.amt!=null) dl += (o.amt - p.amt); });
+  if(transferOn){ const o=ed['xfer']; if(o&&o.amt!=null) dl += (o.amt - cfg.transferAmount); }
+  (cfg.fixedNonDebt||[]).forEach((f,fi)=>{ const o=ed['fix'+fi]; if(o&&o.amt!=null) dl += (o.amt - (-f.amt)); });
+  { const o=ed['rent']; if(o&&o.amt!=null) dl += (o.amt - (-cfg.rentToGrant)); }
+  return dl;
+}
 function engine(debts, cfg, CATS, SPAN = 72) {
   const si = cfg.startIdx || 0;
   const floor = cfg.floor ?? 300;
@@ -604,7 +625,8 @@ function engine(debts, cfg, CATS, SPAN = 72) {
     const income = basePaychecks(i, cfg).reduce((s, p) => s + p.amt, 0) + (transferOn ? cfg.transferAmount : 0);
     const disc = discTotal(cfg, i, CATS);
     const adj = (cfg.monthAdjust && cfg.monthAdjust[i]) || 0; // dated entries / what-if
-    const avail = carry + income - fixedNonDebt - disc - cfg.rentToGrant - paidScheduled - floor + adj;
+    const ld = lineDelta(cfg, i, transferOn); // per-line amount overrides
+    const avail = carry + income - fixedNonDebt - disc - cfg.rentToGrant - paidScheduled - floor + adj + ld;
     let surplus = Math.max(0, avail), rem = surplus;
 
     // 5) cascade: (a) deferred at deadline-risk -> first; (b) avalanche by APR desc;
@@ -628,7 +650,7 @@ function engine(debts, cfg, CATS, SPAN = 72) {
     if (!nonExcludedLeft && rem > 0.005) { toSavings = rem; savings += toSavings; rem = 0; }
 
     // 6) carry-out (true end-of-month checking; reconciles with the ledger by construction)
-    const carryOut = round2(carry + income - fixedNonDebt - disc - cfg.rentToGrant - paidScheduled - deployedToDebt - toSavings);
+    const carryOut = round2(carry + income - fixedNonDebt - disc - cfg.rentToGrant - paidScheduled - deployedToDebt - toSavings + ld);
     D.forEach(d => pay[d.id].after = Math.max(d.bal || 0, 0));
 
     const nonExclDebt = D.filter(d => !isExcl(d)).reduce((s, d) => s + Math.max(d.bal || 0, 0), 0);
@@ -659,30 +681,35 @@ function payoffDate(res, cfg) {
 
 // ---- daily checking ledger for one month (reconciles to carryOut) ----------
 function buildLedger(m, debts, cfg, CATS, isFinal) {
-  const ev = [], P = (d, a, l, k, id) => { if (Math.abs(a) > 0.001) ev.push({ d, a, l, k, id }); };
+  const ev = [], P = (d, a, l, k, id, sk, ea) => { if (Math.abs(a) > 0.001) ev.push({ d, a, l, k, id, sk, ea: !!ea }); };
   const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 22);
   const pds = payDays(m.i, cfg), moveDay = isFinal ? (pds[0] || 1) : (pds[pds.length - 1] || 1);
 
-  // income
-  basePaychecks(m.i, cfg).forEach((p, k) => P(p.day, p.amt, 'Paycheck' + (pds.length > 1 ? ' #' + (k + 1) : ''), 'in'));
-  if (m.transferOn) P(1, cfg.transferAmount, "Grant's transfer", 'in');
-  // fixed non-debt
-  (cfg.fixedNonDebt || []).forEach(f => P(f.day || 1, -f.amt, f.label, 'fix'));
-  // rent -> Grant (its own line, never buried — §3d)
-  P(1, -cfg.rentToGrant, 'Rent → Grant', 'rent');
-  // discretionary (itemized, nonzero only) on day 15
-  CATS.forEach(c => { const v = getB(cfg, m.i, c.key, c.def); if (v > 0.005) P(15, -v, c.label, 'disc'); });
-  // scheduled / minimum per debt (incl. excluded car + 401k)
-  debts.forEach(d => { const s = m.pay[d.id] ? m.pay[d.id].sched : 0; if (s > 0.005) P(d.dueDay || 15, -s, d.name + ' — payment', 'sched', d.id); });
-  // surplus deployments (avalanche / cleared) on the move day
-  debts.forEach(d => { const x = m.pay[d.id] ? m.pay[d.id].extra : 0; if (x > 0.005) { const clears = m.pay[d.id].after < 0.01; P(moveDay, -x, d.name + (clears ? ' — PAID OFF ✓' : ' (extra)'), 'aval', d.id + '-x'); } });
-  // emergency fund sweep
-  if (m.toSavings > 0.005) P(moveDay, -m.toSavings, '→ Emergency fund', 'save');
+  basePaychecks(m.i, cfg).forEach((p, k) => P(p.day, p.amt, 'Paycheck' + (pds.length > 1 ? ' #' + (k + 1) : ''), 'in', null, 'pay' + k, true));
+  if (m.transferOn) P(1, cfg.transferAmount, "Grant's transfer", 'in', null, 'xfer', true);
+  (cfg.fixedNonDebt || []).forEach((f, fi) => P(f.day || 1, -f.amt, f.label, 'fix', null, 'fix' + fi, true));
+  P(1, -cfg.rentToGrant, 'Rent \u2192 Grant', 'rent', null, 'rent', true);
+  CATS.forEach(c => { const v = getB(cfg, m.i, c.key, c.def); if (v > 0.005) P(15, -v, c.label, 'disc', null, 'disc-' + c.key, false); });
+  debts.forEach(d => { const s = m.pay[d.id] ? m.pay[d.id].sched : 0; if (s > 0.005) P(d.dueDay || 15, -s, d.name + ' \u2014 payment', 'sched', d.id, 'sch-' + d.id, false); });
+  debts.forEach(d => { const x = m.pay[d.id] ? m.pay[d.id].extra : 0; if (x > 0.005) { const clears = m.pay[d.id].after < 0.01; P(moveDay, -x, d.name + (clears ? ' \u2014 PAID OFF \u2713' : ' (extra)'), 'aval', d.id + '-x', 'xtr-' + d.id, false); } });
+  if (m.toSavings > 0.005) P(moveDay, -m.toSavings, '\u2192 Emergency fund', 'save', null, 'save', false);
 
-  ev.sort((a, b) => a.d - b.d || (a.k === 'in' ? -1 : 1));
+  ev.forEach(e => { e.rid = m.i + '|' + e.d + '|' + slug(e.l + (e.id || '')); });
+  const ed = (cfg.lineEdits && cfg.lineEdits[m.i]) || {};
+  ev.forEach(e => { const o = ed[e.sk]; if (o) { if (e.ea && o.amt != null) e.a = o.amt; if (o.day != null) e.d = o.day; if (o.label != null && o.label !== '') e.l = o.label; } });
+  const ord = (cfg.lineOrder && cfg.lineOrder[m.i]) || [];
+  ev.sort((a, b) => {
+    if (a.d !== b.d) return a.d - b.d;                         // DATE is always primary -> any date edit auto-sorts
+    const ia = ord.indexOf(a.sk), ib = ord.indexOf(b.sk);     // same day only: honor manual drag order
+    if (ia >= 0 && ib >= 0) return ia - ib;
+    if (ia >= 0) return -1;
+    if (ib >= 0) return 1;
+    return (a.k === 'in' ? 0 : 1) - (b.k === 'in' ? 0 : 1);   // default: income first
+  });
+
   let bal = m.carryIn, low = bal, lowd = 0;
-  const rows = [{ day: '', label: 'Starting checking', amt: null, bal, k: 'start', action: false }];
-  ev.forEach(e => { bal += e.a; if (bal < low) { low = bal; lowd = e.d; } rows.push({ day: e.d, label: e.l, amt: e.a, bal, k: e.k, action: e.a < 0, id: m.i + '|' + e.d + '|' + slug(e.l + (e.id || '')) }); });
+  const rows = [{ day: '', label: 'Starting checking', amt: null, bal, k: 'start', action: false, sk: 'start', ea: false }];
+  ev.forEach(e => { bal += e.a; if (bal < low) { low = bal; lowd = e.d; } rows.push({ day: e.d, label: e.l, amt: e.a, bal, k: e.k, action: e.a < 0, id: e.rid, sk: e.sk, ea: e.ea }); });
   return { rows, endBal: round2(bal), low: round2(low), lowd, negative: low < -0.005 };
 }
 
@@ -728,8 +755,8 @@ const DEFAULT_CATS=[
   {key:'nails',label:'Nails',min:0,max:200,step:5,def:70},
   {key:'hair',label:'Hair',min:0,max:200,step:5,def:12},
   {key:'subs',label:'Subscriptions',min:0,max:100,step:1,def:9},
-  {key:'fun',label:'Fun / misc',min:0,max:600,step:10,def:0},
-  {key:'phone',label:'Phone (annual)',min:0,max:1000,step:5,def:0},
+  {key:'fun',label:'Extra',min:0,max:600,step:10,def:0},
+  {key:'phone',label:'Phone',min:0,max:1000,step:5,def:0},
   {key:'carins',label:'Car insurance',min:0,max:2000,step:10,def:0}
 ];
 const DEFAULT_CFG=()=>({income:2696,paycheck:1348,rentToGrant:700,fixedNonDebt:[],transferAmount:1000,transferStartIdx:8,startCash:800,floor:300,payCadence:'semimonthly',payDays:[7,22],budgetDefault:{groceries:0,dining:0,nails:70,hair:12,subs:9,fun:0,phone:0,carins:0},budgetOverride:{},monthAdjust:{},hysaRate:4.0,savingsTarget:15000,startSavings:0,scheduledStrategy:'clear',applyAll:false,startIdx:0});
@@ -766,6 +793,8 @@ function migrate(){
   if(!Array.isArray(state.cats)||!state.cats.length)state.cats=DEFAULT_CATS.map(x=>({...x}));
   const have=new Set(state.cats.map(x=>x.key));
   DEFAULT_CATS.forEach(dc=>{if(!have.has(dc.key))state.cats.push({...dc});});
+  state.cats.forEach(sc=>{const dc=DEFAULT_CATS.find(d=>d.key===sc.key);if(dc){if(!sc.labelCustom)sc.label=dc.label;if(sc.min==null)sc.min=dc.min;if(sc.max==null)sc.max=dc.max;if(sc.step==null)sc.step=dc.step;}});
+  c.lineEdits=c.lineEdits||{};c.lineOrder=c.lineOrder||{};
   c.budgetDefault=c.budgetDefault||{};
   DEFAULT_CATS.forEach(dc=>{if(c.budgetDefault[dc.key]==null)c.budgetDefault[dc.key]=dc.def;});
   if(Array.isArray(c.fixedNonDebt)&&c.fixedNonDebt.length){c.fixedNonDebt=c.fixedNonDebt.filter(f=>!/phone|car\s*ins/i.test(f.label||''));}
@@ -931,17 +960,18 @@ function renderMonths(V){
   const cur=V.cur;
   const ds=$('donestrip');ds.innerHTML='';for(let i=0;i<state.cfg.startIdx;i++)ds.insertAdjacentHTML('beforeend','<span class="donechip">'+monthLabel(i)+' &#10003;</span>');
   const mc=$('months');mc.innerHTML='';
+  const GRIP='<svg viewBox="0 0 8 14" width="7" height="12" fill="currentColor" aria-hidden="true"><circle cx="2" cy="2" r="1"/><circle cx="6" cy="2" r="1"/><circle cx="2" cy="7" r="1"/><circle cx="6" cy="7" r="1"/><circle cx="2" cy="12" r="1"/><circle cx="6" cy="12" r="1"/></svg>';
   const nm=id=>(state.debts.find(d=>d.id===id)||{name:id}).name;
   cur.months.forEach((m,ri)=>{
     const active=ri===0,isFinal=m.i===cur.payoffIdx,L=buildLedger(m,state.debts,state.cfg,CATS(),isFinal);
     const moves=Object.entries(m.pay).map(([id,v])=>({id,amt:v.extra+(v.after<0.01?v.sched:0),b4:v.b4,after:v.after,clears:v.after<0.01,extra:v.extra})).filter(x=>x.extra>0.5||(x.clears&&x.amt>0.5)).sort((a,b)=>b.amt-a.amt);
     const summary=moves.length?moves.slice(0,2).map(x=>'<span class="acc">'+fmt0(x.amt)+' &#8594; '+nm(x.id)+'</span>').join(' &middot; ')+(m.toSavings>0.5?' &middot; <span style="color:var(--indigo)">'+fmt0(m.toSavings)+' &#8594; savings</span>':''):(m.toSavings>0.5?'<span style="color:var(--indigo)">'+fmt0(m.toSavings)+' &#8594; emergency fund</span>':'<span style="color:var(--green)">Cruising — savings mode</span>');
     const hasOv=!!state.cfg.budgetOverride[m.i];
-    let tuner='<div class="tuner"><div class="th"><span class="tt">Tune this month\'s spending</span><span class="tot" id="tot-'+m.i+'">'+fmt0(m.disc)+'/mo</span></div>';
-    CATS().forEach(c=>{const val=getB(opts(),m.i,c.key,c.def),chg=hasOv&&state.cfg.budgetOverride[m.i][c.key]!=null;tuner+='<div class="slrow '+(chg?'changed':'')+'"><label>'+c.label+'</label><input type="range" min="'+c.min+'" max="'+c.max+'" step="'+c.step+'" value="'+val+'" data-mi="'+m.i+'" data-cat="'+c.key+'"><span class="v" id="v-'+m.i+'-'+c.key+'">'+fmt0(val)+'</span></div>';});
-    tuner+='<div class="tf"><label class="applyall"><input type="checkbox" data-applyall '+(state.cfg.applyAll?'checked':'')+'> apply to every month</label><button class="btreset" data-bt="'+m.i+'">reset this month</button></div></div>';
-    let led='<table class="led">';
-    L.rows.forEach(r=>{const isLow=(r.day===L.lowd&&r.k!=='start'&&Math.abs(r.bal-L.low)<0.01),ckd=r.action&&state.checks[r.id];const amt=r.amt==null?'':((r.amt>=0?'+':'')+r.amt.toFixed(2));led+='<tr class="'+r.k+' '+(isLow?'low':'')+' '+(ckd?'checked':'')+'"><td class="lck">'+(r.action?'<input type="checkbox" data-ck="'+r.id+'" data-amt="'+Math.abs(r.amt||0).toFixed(0)+'" '+(ckd?'checked':'')+'>':'')+'</td><td class="ld">'+(r.day||'')+'</td><td class="ll">'+r.label+'</td><td class="la '+(r.amt>=0?'pos':'')+'">'+amt+'</td><td class="lb">'+r.bal.toFixed(2)+'</td></tr>';});led+='</table>';
+    let tuner='<div class="tuner"><div class="th"><span class="tt">Tune this month\'s spending</span><span class="tot" id="tot-'+m.i+'">'+fmt0(m.disc)+'/mo</span></div><div class="slwrap" data-mi="'+m.i+'">';
+    CATS().forEach(c=>{const val=getB(opts(),m.i,c.key,c.def),chg=hasOv&&state.cfg.budgetOverride[m.i][c.key]!=null;tuner+='<div class="slrow '+(chg?'changed':'')+'" data-catkey="'+c.key+'"><span class="grip" title="Drag to reorder">'+GRIP+'</span><label class="edit" data-edit="catlabel" data-catkey="'+c.key+'" title="Click to rename">'+c.label+'</label><input type="range" min="'+c.min+'" max="'+c.max+'" step="'+c.step+'" value="'+val+'" data-mi="'+m.i+'" data-cat="'+c.key+'"><span class="v" id="v-'+m.i+'-'+c.key+'">'+fmt0(val)+'</span></div>';});
+    tuner+='</div><div class="tf"><label class="applyall"><input type="checkbox" data-applyall '+(state.cfg.applyAll?'checked':'')+'> apply to every month</label><label class="applyall"><input type="checkbox" data-saveconfig '+(state.cfg.saveConfig?'checked':'')+'> save this configuration for all months</label><button class="btreset" data-bt="'+m.i+'">reset this month</button></div></div>';
+    let led='<table class="led"><tbody class="ledbody" data-mi="'+m.i+'">';
+    L.rows.forEach(r=>{const isLow=(r.day===L.lowd&&r.k!=='start'&&Math.abs(r.bal-L.low)<0.01),ckd=r.action&&state.checks[r.id];const amt=r.amt==null?'':((r.amt>=0?'+':'')+r.amt.toFixed(2));const ed=r.k!=='start';led+='<tr class="'+r.k+' '+(isLow?'low':'')+' '+(ckd?'checked':'')+'" data-sk="'+r.sk+'"><td class="lg">'+(ed?'<span class="grip" title="Drag to reorder">'+GRIP+'</span>':'')+'</td><td class="lck">'+(r.action?'<input type="checkbox" data-ck="'+r.id+'" data-amt="'+Math.abs(r.amt||0).toFixed(0)+'" '+(ckd?'checked':'')+'>':'')+'</td><td class="ld'+(ed?' edit':'')+'"'+(ed?' data-edit="day" data-sk="'+r.sk+'" data-mi="'+m.i+'" title="Click to change the date"':'')+'>'+(r.day||'')+'</td><td class="ll'+(ed?' edit':'')+'"'+(ed?' data-edit="label" data-sk="'+r.sk+'" data-mi="'+m.i+'" title="Click to rename"':'')+'>'+r.label+'</td><td class="la '+(r.amt>=0?'pos':'')+(r.ea?' edit':'')+'"'+(r.ea?' data-edit="amt" data-sk="'+r.sk+'" data-mi="'+m.i+'" title="Click to change the amount"':'')+'>'+amt+'</td><td class="lb">'+r.bal.toFixed(2)+'</td></tr>';});led+='</tbody></table><label class="applyall ledgerall"><input type="checkbox" data-ledgerall="'+m.i+'"> apply layout &amp; name edits to all months</label>';
     let movesHTML='';if(moves.length){movesHTML='<div class="lab">Ground gained</div><div class="mlh"><span></span><span class="col">Balance</span><span class="col">Payment</span><span class="col">Left</span></div>';moves.forEach(x=>{const apr=(state.debts.find(d=>d.id===x.id)||{apr:0}).apr;movesHTML+='<div class="moveln '+(x.clears?'clears':'')+'"><div class="mn">'+nm(x.id)+'<span class="apr">'+(apr||0).toFixed(2)+'%</span>'+(x.clears?' <span style="color:var(--green);font-size:9px;font-weight:700">CLEARS &#10003;</span>':'')+'</div><div class="col">'+fmt0(x.b4)+'</div><div class="col pmt">'+fmt0(x.amt)+'</div><div class="col">'+(x.clears?'$0':fmt0(x.after))+'</div></div>';});}
     const dmiss=m.deferred.find(x=>x.missed);
     const defHTML=dmiss?'<div class="flag bad"><span class="ic">&#9888;</span><span>'+nm(dmiss.id)+' missed its 0% deadline here — ~<b class="mono">'+fmt0(dmiss.retro)+'</b> back-interest added.</span></div>':'';
@@ -978,7 +1008,6 @@ function renderSavings(V){
 
 /* ====================== SETUP PANEL ====================== */
 function buildSetup(){
-  $('checklist').innerHTML='<div class="lab" style="margin:0 0 6px">First time? Five minutes with your statements (optional — it already runs on estimates)</div><ul>'+CHECKLIST_ITEMS.map(t=>'<li>'+t+'</li>').join('')+'</ul>';
   buildDebtEditor();
   const c=state.cfg;
   $('cfg-paycheck').value=(c.paycheck!=null?c.paycheck:c.income);$('cfg-rent').value=c.rentToGrant;$('cfg-floor').value=c.floor;$('cfg-startcash').value=c.startCash;
@@ -1060,7 +1089,7 @@ function addDebt(){
 function bindCfg(){
   const num=(id,key)=>{const el=$(id);el.addEventListener('input',()=>{const v=parseFloat(el.value);if(!isNaN(v)){state.cfg[key]=v;save();renderAll();}});};
   $('cfg-paycheck').addEventListener('input',()=>{const v=parseFloat($('cfg-paycheck').value);if(!isNaN(v)){state.cfg.paycheck=v;state.cfg.income=v*((state.cfg.payDays&&state.cfg.payDays.length)||1);save();renderAll();}});
-  const payday=(id,idx)=>{const el=$(id);el.addEventListener('input',()=>{let v=parseInt(el.value,10);if(!isNaN(v)){v=Math.min(28,Math.max(1,v));state.cfg.payDays=state.cfg.payDays||[7,22];state.cfg.payDays[idx]=v;save();renderAll();}});};
+  const payday=(id,idx)=>{const el=$(id);el.addEventListener('input',()=>{let v=parseInt(el.value,10);if(!isNaN(v)){v=Math.min(31,Math.max(1,v));state.cfg.payDays=state.cfg.payDays||[7,22];state.cfg.payDays[idx]=v;save();renderAll();}});};
   payday('cfg-pd1',0);payday('cfg-pd2',1);
   num('cfg-rent','rentToGrant');num('cfg-floor','floor');num('cfg-startcash','startCash');
   num('cfg-tamt','transferAmount');num('cfg-savetgt','savingsTarget');num('cfg-hysa','hysaRate');
@@ -1090,6 +1119,81 @@ function bindMonthEvents(cur){
   mc.querySelectorAll('input[data-ck]').forEach(cb=>cb.addEventListener('change',e=>{e.stopPropagation();const id=cb.dataset.ck;if(cb.checked)state.checks[id]=true;else delete state.checks[id];save();const tr=cb.closest('tr');if(tr)tr.classList.toggle('checked',cb.checked);if(cb.checked&&tr){tr.classList.remove('justpulse');void tr.offsetWidth;tr.classList.add('justpulse');floatAmt(cb);pulseRail();const rr=cb.getBoundingClientRect();sparkBurst(rr.left+8,rr.top+8);pingNearestCamp();}updateMonthMeter(cb.closest('.mcard'));updateMomentum();}));
   mc.querySelectorAll('[data-mreset]').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();const p=b.dataset.mreset+'|';Object.keys(state.checks).forEach(k=>{if(k.startsWith(p))delete state.checks[k];});save();renderMonths(computeView());}));
   mc.querySelectorAll('.advancebtn').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();const r=cur.months[0];state.debts.forEach(d=>{if(d.bal!=null)d.bal=r.balances[d.id]!=null?r.balances[d.id]:d.bal;});state.cfg.startIdx=Math.min(36,state.cfg.startIdx+1);save();buildSetup();renderAll();window.scrollTo({top:0,behavior:'smooth'});}));
+  // inline edit — click a date or amount, a box pops up; Enter or click-away saves, Esc cancels
+  mc.querySelectorAll('[data-edit]').forEach(cell=>cell.addEventListener('click',e=>{e.stopPropagation();e.preventDefault();inlineEdit(cell);}));
+  // drag-reorder the sliders (order is shared across every month)
+  mc.querySelectorAll('.slwrap').forEach(w=>makeSortable(w,'.slrow','data-catkey',keys=>{
+    const map={};state.cats.forEach(c=>map[c.key]=c);const next=keys.map(k=>map[k]).filter(Boolean);
+    state.cats.forEach(c=>{if(keys.indexOf(c.key)<0)next.push(c);});state.cats=next;save();renderMonths(computeView());
+  }));
+  // drag-reorder this month's ledger lines
+  mc.querySelectorAll('.ledbody').forEach(b=>{const mi=+b.dataset.mi;makeSortable(b,'tr','data-sk',keys=>{
+    state.cfg.lineOrder[mi]=keys.filter(k=>k&&k!=='start');save();renderMonths(computeView());
+  });});
+  // save the whole slider configuration (values + order) as the default for every month
+  mc.querySelectorAll('input[data-saveconfig]').forEach(cb=>cb.addEventListener('change',()=>{
+    state.cfg.saveConfig=cb.checked;
+    if(cb.checked){const w=cb.closest('.tuner').querySelector('.slwrap');const mi=w?+w.dataset.mi:state.cfg.startIdx;const o=opts();
+      state.cats.forEach(c=>{state.cfg.budgetDefault[c.key]=getB(o,mi,c.key,c.def);});state.cfg.budgetOverride={};
+      save();renderMonths(computeView());showToast('Slider configuration saved for all months');}
+    else save();
+  }));
+  // apply this month's ledger layout (line order) to every month
+  mc.querySelectorAll('input[data-ledgerall]').forEach(cb=>cb.addEventListener('change',()=>{
+    if(!cb.checked)return;const mi=+cb.dataset.ledgerall;
+    const srcOrder=state.cfg.lineOrder[mi],srcEdits=state.cfg.lineEdits[mi]||{};
+    const labels={};Object.keys(srcEdits).forEach(sk=>{if(srcEdits[sk]&&srcEdits[sk].label!=null)labels[sk]=srcEdits[sk].label;});
+    const haveOrder=srcOrder&&srcOrder.length,haveLabels=Object.keys(labels).length>0;
+    if(!haveOrder&&!haveLabels){cb.checked=false;showToast('Make a name or order change first, then apply to all');return;}
+    for(let k=0;k<=18;k++){
+      if(haveOrder)state.cfg.lineOrder[k]=srcOrder.slice();
+      Object.keys(labels).forEach(sk=>{state.cfg.lineEdits[k]=state.cfg.lineEdits[k]||{};state.cfg.lineEdits[k][sk]=state.cfg.lineEdits[k][sk]||{};state.cfg.lineEdits[k][sk].label=labels[sk];});
+    }
+    save();renderMonths(computeView());showToast('Layout & name edits applied to all months');
+  }));
+}
+function inlineEdit(cell){
+  if(cell.querySelector('.celledit'))return;
+  const type=cell.dataset.edit,sk=cell.dataset.sk,mi=+cell.dataset.mi,catkey=cell.dataset.catkey;
+  const raw=cell.textContent.trim();cell.dataset.prevhtml=cell.innerHTML;
+  let startVal=raw;
+  if(type==='amt'){const num=parseFloat(raw.replace(/[+,$\s]/g,''));startVal=isFinite(num)?Math.abs(num).toString():'';}
+  const inp=document.createElement('input');inp.type='text';inp.className='celledit'+((type==='label'||type==='catlabel')?' txt':'');inp.value=startVal;
+  inp.setAttribute('inputmode',type==='day'?'numeric':(type==='amt'?'decimal':'text'));
+  if(type==='label'||type==='catlabel')inp.maxLength=40;
+  cell.textContent='';cell.appendChild(inp);inp.focus();try{inp.select();}catch(_){}
+  let done=false;
+  const finish=(saveIt)=>{
+    if(done)return;done=true;
+    if(saveIt){
+      if(type==='catlabel'){
+        const c=state.cats.find(x=>x.key===catkey);
+        if(c){const t=inp.value.trim();if(t){c.label=t;c.labelCustom=true;}}
+        save();renderMonths(computeView());
+      }else{
+        state.cfg.lineEdits[mi]=state.cfg.lineEdits[mi]||{};const e=state.cfg.lineEdits[mi];e[sk]=e[sk]||{};
+        if(type==='day'){let d=parseInt(inp.value,10);if(isFinite(d)){d=Math.max(1,Math.min(31,d));e[sk].day=d;}}
+        else if(type==='label'){const t=inp.value.trim();if(t)e[sk].label=t;else delete e[sk].label;}
+        else{let v=parseFloat(inp.value.replace(/[$,\s]/g,''));if(isFinite(v)){const sign=cell.classList.contains('pos')?1:-1;e[sk].amt=sign*Math.abs(v);}}
+        if(e[sk]&&Object.keys(e[sk]).length===0)delete e[sk];
+        save();renderMonths(computeView());
+      }
+    }else{cell.innerHTML=cell.dataset.prevhtml;}
+  };
+  inp.addEventListener('keydown',ev=>{if(ev.key==='Enter'){ev.preventDefault();finish(true);}else if(ev.key==='Escape'){ev.preventDefault();finish(false);}});
+  inp.addEventListener('blur',()=>finish(true));
+}
+function dragAfter(container,sel,y){const els=[...container.querySelectorAll(sel+':not(.dragging)')];let best=null,bd=-Infinity;els.forEach(el=>{const b=el.getBoundingClientRect();const off=y-b.top-b.height/2;if(off<0&&off>bd){bd=off;best=el;}});return best;}
+function makeSortable(container,sel,keyAttr,onReorder){
+  let dragEl=null;
+  container.querySelectorAll(sel).forEach(it=>{
+    const grip=it.querySelector('.grip');if(!grip)return;
+    const on=()=>{it.draggable=true;};grip.addEventListener('mousedown',on);grip.addEventListener('touchstart',on,{passive:true});
+    it.addEventListener('dragstart',e=>{dragEl=it;it.classList.add('dragging');try{e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','');}catch(_){}});
+    it.addEventListener('dragend',()=>{it.draggable=false;dragEl=null;container.querySelectorAll(sel).forEach(x=>x.classList.remove('dragging','dragover'));});
+  });
+  container.addEventListener('dragover',e=>{if(!dragEl)return;e.preventDefault();const after=dragAfter(container,sel,e.clientY);container.querySelectorAll(sel).forEach(x=>x.classList.remove('dragover'));if(after&&after!==dragEl)after.classList.add('dragover');});
+  container.addEventListener('drop',e=>{if(!dragEl)return;e.preventDefault();const after=dragAfter(container,sel,e.clientY);const items=[...container.querySelectorAll(sel)].filter(x=>x!==dragEl);const idx=after?items.indexOf(after):items.length;if(idx<0)items.push(dragEl);else items.splice(idx,0,dragEl);const keys=items.map(x=>x.getAttribute(keyAttr));container.querySelectorAll(sel).forEach(x=>x.classList.remove('dragover'));onReorder(keys);});
 }
 
 function bind(){
